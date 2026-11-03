@@ -1,0 +1,250 @@
+-- Auto Strafe On
+
+-- ============================================================
+-- SETTINGS
+-- ============================================================
+local FLAG = "AutoStrafe"     -- name of this auto strafe (the Off script needs the same flag)
+local PIXELS = KAS              -- how far a mouse would move every frame while strafing, in pixels (decimals work too, like 0.5)
+local STICK_DEADZONE = JSDZ    -- how far a joystick must be pushed before it counts (0 to 1)
+local ONLY_IN_AIR = OIAAS     -- true = only strafes while you're in the air (or were in the air a moment ago)
+local AIR_GRACE = 0.3         -- seconds it keeps working after you land (only used when ONLY_IN_AIR is true)
+
+-- ============================================================
+-- DO NOT EDIT BELOW THIS LINE
+-- ============================================================
+-- Auto Strafe turns the camera the way you are moving sideways.
+--   Keyboard:  A (or Left arrow) turns left, D (or Right arrow) turns right.
+--              If W or S is pressed too (or A and D together), it does nothing.
+--   Joystick (mobile or controller): anywhere on the left half of the stick turns left,
+--              anywhere on the right half turns right.
+--   Nothing pressed or pushed at all = it does nothing.
+--   ONLY_IN_AIR = true: it only works while you're in the air, or if you were in the air
+--   within the last AIR_GRACE seconds (0.1 by default).
+-- The turn is fed into Roblox's own camera input (like moving the mouse a tiny bit each
+-- frame), so nothing is forced, only left/right is added, and no executor functions are used.
+-- Run Auto Strafe Off (same FLAG) to stop it.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+-- Flag rules: no spaces and none of these characters
+local FLAG_FORBIDDEN = [===['";*()^%$+×÷=/€£¥₩`~\|<>{}[]▪︎○●□■♤♡◇♧☆⊙°•¤《》¡¿,.]===]
+
+local function flagProblem(flag)
+	if type(flag) ~= "string" or flag == "" then
+		return "the flag is empty"
+	end
+	if flag:find("%s") then
+		return "the flag contains a space"
+	end
+	local banned = { [160] = true, [0x200B] = true, [0x3000] = true }
+	for _, cp in utf8.codes(FLAG_FORBIDDEN) do
+		banned[cp] = true
+	end
+	for _, cp in utf8.codes(flag) do
+		if banned[cp] then
+			return 'the flag contains a character that is not allowed: "' .. utf8.char(cp) .. '"'
+		end
+	end
+	return nil
+end
+
+local flagOk, problem = pcall(flagProblem, FLAG)
+if not flagOk then problem = "the flag is not valid text" end
+if problem then
+	warn("Auto Strafe: " .. problem .. " (FLAG = " .. tostring(FLAG) .. ")")
+	return
+end
+
+local BIND = "AutoStrafe_" .. FLAG -- the On and Off scripts find each other through the flag
+
+-- Attribute names only allow letters, numbers and underscores, so encode anything else
+local ATTRIBUTE = "AutoStrafeRun_" .. (FLAG:gsub("[^%w]", function(c)
+	return string.format("_%02X", string.byte(c))
+end))
+
+local player = Players.LocalPlayer
+
+if type(PIXELS) ~= "number" or PIXELS <= 0 then
+	warn("Auto Strafe: PIXELS must be a number above 0 (PIXELS = " .. tostring(PIXELS) .. ")")
+	return
+end
+if type(STICK_DEADZONE) ~= "number" or STICK_DEADZONE < 0 or STICK_DEADZONE >= 1 then
+	warn("Auto Strafe: STICK_DEADZONE must be a number from 0 up to (not including) 1 (STICK_DEADZONE = " .. tostring(STICK_DEADZONE) .. ")")
+	return
+end
+
+if type(AIR_GRACE) ~= "number" or AIR_GRACE < 0 then
+	warn("Auto Strafe: AIR_GRACE must be a number of seconds, 0 or higher (AIR_GRACE = " .. tostring(AIR_GRACE) .. ")")
+	return
+end
+
+-- Roblox's camera turns about 0.5 degrees for every pixel of mouse movement
+local radiansPerFrame = math.rad(PIXELS * 0.5)
+
+-- Each run gets its own id, so running this again (same flag) replaces the old one
+local runId = tostring(os.clock())
+local renderName = BIND .. runId
+
+local connections = {}
+local pending -- the shared camera-input table (nil = turn the camera directly instead)
+
+-- Roblox's own movement controls (covers the mobile thumbstick and controller sticks)
+local controls
+do
+	local ok, result = pcall(function()
+		local playerScripts = player:WaitForChild("PlayerScripts", 3)
+		local playerModule = playerScripts:WaitForChild("PlayerModule", 3)
+		return require(playerModule):GetControls()
+	end)
+	if ok and type(result) == "table" and type(result.GetMoveVector) == "function" then
+		controls = result
+	end
+end
+
+-- Find the default camera's input module
+local function findCameraInput()
+	local ok, result = pcall(function()
+		local playerScripts = player:WaitForChild("PlayerScripts", 3)
+		local playerModule = playerScripts:WaitForChild("PlayerModule", 3)
+		local cameraModule = playerModule:WaitForChild("CameraModule", 3)
+		return require(cameraModule:WaitForChild("CameraInput", 3))
+	end)
+	if ok and type(result) == "table" and type(result.getRotation) == "function" then
+		return result
+	end
+	return nil
+end
+
+-- Add our turn to the camera's input once per frame (shared with the Turn Binds scripts)
+local cameraInput = findCameraInput()
+if cameraInput then
+	local hooked = pcall(function()
+		pending = cameraInput.TurnBindsPending
+		if not pending then
+			pending = {}
+			cameraInput.TurnBindsPending = pending
+
+			local originalGetRotation = cameraInput.getRotation
+			cameraInput.getRotation = function(...)
+				local rotation = originalGetRotation(...)
+				if typeof(rotation) ~= "Vector2" then return rotation end
+
+				local extra = Vector2.zero
+				for flag, amount in pairs(pending) do
+					extra += amount
+					pending[flag] = Vector2.zero -- used up, so it only counts once per frame
+				end
+				return rotation + extra
+			end
+		end
+	end)
+	if not hooked then pending = nil end
+end
+if not pending then
+	warn("Auto Strafe: the default camera input wasn't found, turning the camera directly instead.")
+end
+
+-- Where is the joystick pointing? x = sideways (right is positive), z = forward/back
+local function getStickVector()
+	if controls then
+		local ok, vector = pcall(controls.GetMoveVector, controls)
+		if ok and typeof(vector) == "Vector3" then return vector end
+	end
+
+	-- backup: the character's movement relative to the camera
+	local camera = workspace.CurrentCamera
+	local char = player.Character
+	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+	if camera and humanoid then
+		return camera.CFrame:VectorToObjectSpace(humanoid.MoveDirection)
+	end
+	return Vector3.zero
+end
+
+-- -1 = turn left, 1 = turn right, 0 = do nothing
+local function getStrafeDirection()
+	if UserInputService:GetFocusedTextBox() then return 0 end
+
+	-- Keyboard: A / D (or the arrow keys). W or S pressed = do nothing
+	local left = UserInputService:IsKeyDown(Enum.KeyCode.A) or UserInputService:IsKeyDown(Enum.KeyCode.Left)
+	local right = UserInputService:IsKeyDown(Enum.KeyCode.D) or UserInputService:IsKeyDown(Enum.KeyCode.Right)
+	local forward = UserInputService:IsKeyDown(Enum.KeyCode.W) or UserInputService:IsKeyDown(Enum.KeyCode.Up)
+	local back = UserInputService:IsKeyDown(Enum.KeyCode.S) or UserInputService:IsKeyDown(Enum.KeyCode.Down)
+	if left or right or forward or back then
+		if forward or back then return 0 end
+		if left and right then return 0 end
+		return left and -1 or 1
+	end
+
+	-- Joystick (mobile thumbstick or controller stick): left half = left, right half = right
+	local stick = getStickVector()
+	if stick.Magnitude < STICK_DEADZONE then return 0 end
+	if stick.X < -0.05 then return -1 end
+	if stick.X > 0.05 then return 1 end
+	return 0
+end
+
+-- Stop everything (used by the Off script and when this script gets replaced)
+local function shutdown()
+	pcall(function()
+		RunService:UnbindFromRenderStep(renderName)
+	end)
+	for _, c in ipairs(connections) do c:Disconnect() end
+	table.clear(connections)
+	if pending then pending[BIND] = Vector2.zero end
+end
+
+-- Only in air: true while the player is airborne, and for AIR_GRACE seconds after
+local lastAirTime = -math.huge
+
+local function airAllowed()
+	local char = player.Character
+	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+	if humanoid and humanoid.FloorMaterial == Enum.Material.Air and not humanoid.Sit then
+		local state = humanoid:GetState()
+		if state ~= Enum.HumanoidStateType.Climbing
+			and state ~= Enum.HumanoidStateType.Swimming
+			and state ~= Enum.HumanoidStateType.Dead then
+			lastAirTime = os.clock()
+		end
+	end
+	return os.clock() - lastAirTime <= AIR_GRACE
+end
+
+-- Runs every frame, just before the camera reads its input
+local function strafe()
+	if ONLY_IN_AIR == true and not airAllowed() then
+		if pending then pending[BIND] = Vector2.zero end
+		return
+	end
+
+	local direction = getStrafeDirection()
+	if direction == 0 then
+		if pending then pending[BIND] = Vector2.zero end
+		return
+	end
+
+	if pending then
+		pending[BIND] = Vector2.new(direction * radiansPerFrame, 0)
+	else
+		local camera = workspace.CurrentCamera
+		if not camera then return end
+
+		local pivot = camera.CFrame.Position
+		if camera.CameraType == Enum.CameraType.Custom then
+			pivot = camera.Focus.Position
+		end
+		camera.CFrame = CFrame.new(pivot) * CFrame.Angles(0, -direction * radiansPerFrame, 0) * CFrame.new(-pivot) * camera.CFrame
+	end
+end
+
+local priority = pending and Enum.RenderPriority.Input.Value or Enum.RenderPriority.Camera.Value + 1
+RunService:BindToRenderStep(renderName, priority, strafe)
+
+-- The Off script (or a newer run with the same flag) changes this, which shuts this run down
+player:SetAttribute(ATTRIBUTE, runId)
+connections[#connections + 1] = player:GetAttributeChangedSignal(ATTRIBUTE):Connect(function()
+	if player:GetAttribute(ATTRIBUTE) ~= runId then shutdown() end
+end)
