@@ -6,7 +6,7 @@
 local FLAG = "TurnKeys"       -- name of this key setup (the Off script needs the same flag)
 local LEFT_KEY = "A"          -- hold to turn the camera LEFT  (e.g. "Q", "LeftShift", "Z")
 local RIGHT_KEY = "D"         -- hold to turn the camera RIGHT (e.g. "E", "RightShift", "C")
-local PIXELS = 1              -- how far a mouse would move every frame, in pixels (decimals work too, like 0.5)
+local PIXELS = KTB              -- how far a mouse would move every frame, in pixels (decimals work too, like 0.5)
 
 -- ============================================================
 -- DO NOT EDIT BELOW THIS LINE
