@@ -1,0 +1,34 @@
+local player = game.Players.LocalPlayer
+local runService = game:GetService("RunService")
+
+if _G.RuinWareYLockConnection then
+    _G.RuinWareYLockConnection:Disconnect()
+end
+
+local lockedY = nil
+
+_G.RuinWareYLockConnection = runService.RenderStepped:Connect(function()
+    local character = player.Character
+    if not character then return end
+    
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    if not lockedY then
+        lockedY = hrp.Position.Y
+    end
+
+    local pos = hrp.Position
+    local look = hrp.CFrame.LookVector
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    
+    if flatLook.Magnitude < 0.01 then flatLook = Vector3.new(0, 0, -1) end
+    flatLook = flatLook.Unit
+
+    hrp.CFrame = CFrame.lookAt(Vector3.new(pos.X, lockedY, pos.Z), Vector3.new(pos.X, lockedY, pos.Z) + flatLook)
+
+    local vel = hrp.AssemblyLinearVelocity
+    if math.abs(vel.Y) > 0.1 then
+        hrp.AssemblyLinearVelocity = Vector3.new(vel.X, 0, vel.Z)
+    end
+end)
