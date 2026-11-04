@@ -14,19 +14,32 @@ local GLOW_SPREAD = 70
 local GLOW_BRIGHTNESS = 0.50
 local GLOW_SLICE = 0.4
 local SCREEN_MARGIN = 6
-local TEXT_NUDGE_Y = -0.2
+local TEXT_NUDGE_Y = -30
 local BAR_DISTANCE = 5
 local DRAG_FOLLOW_SPEED = 9
 local RESIZE_FOLLOW_SPEED = 26
+local PILL_HEIGHT = MIN_SIZE.Y                 -- how tall the pill shape is
+local PILL_TEXT_NUDGE_Y = 0                    -- text height in the pill shape
+local CIRCLE_TEXT_NUDGE_Y = TEXT_NUDGE_Y       -- text height in the circle shape
+local MORPH_FOLLOW_SPEED = 10                  -- lower = slower, smoother shape changes
+local SAVE_POSITION = true                     -- remember where you left each button (by its FLAG)
+local SAVE_FILE = "MobileButtons_Positions.json" -- must match ResetMBPositions
+local MODE_NAMES = { default = "Default", pill = "Pill", circle = "Circle" } -- shown when the shape changes
+local MODE_TEXT_TIME = 1                       -- seconds the shape name stays before fading back to the title
 local RUN_OFF_CODE_ON_DESTROY = true
+
+-- ============================================================
+-- SERVICE / GUI CREATE
+-- ============================================================
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local CollectionService = game:GetService("CollectionService")
+local HttpService = game:GetService("HttpService")
 
-local TAG = "DraggableBoxGui"
+local TAG = "DraggableBoxGui" -- must match DestroyAllGuis
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
@@ -38,16 +51,32 @@ local BAR_IDLE = 0.55
 local ICON_IDLE = 0.45
 local TEXT_TRANSPARENCY = 0.05
 
+-- Drag bar sits outside, below the box
 local BAR_SIZE = UDim2.fromOffset(51, 3)
 local BAR_SIZE_ACTIVE = UDim2.fromOffset(61, 4)
 local BAR_HIT = Vector2.new(72, 22)
-local BAR_BELOW = BAR_DISTANCE + BAR_HIT.Y / 2
+local BAR_BELOW = BAR_DISTANCE + BAR_HIT.Y / 2 -- how far the bar area reaches below the box
 
-local ICON_R = 15
-local ICON_THICK = 2.5
-local ICON_INSET = 12
+-- Pill shape: a vertical resize bar inside the body (resizes the length only)
+local PILL_BAR_SIZE = UDim2.fromOffset(3, 36)
+local PILL_BAR_SIZE_ACTIVE = UDim2.fromOffset(4, 46)
+local PILL_HIT = Vector2.new(30, 60)
+
+-- Cycle button (top-left): a circle with two arrows, cycles the shape (default > pill > circle)
+local CYCLE_BOX = 26
+local CYCLE_R = 7
+local CYCLE_THICK = 2
+local CYCLE_HIT = 34
+local CYCLE_IDLE = 0.55
+local CORNER_SPEED = 14 -- how fast the corners ease between shapes
+
+-- Resize icon: a hollow quarter circle with rounded ends
+local ICON_R = 15          -- radius of the quarter circle
+local ICON_THICK = 2.5     -- line thickness
+local ICON_INSET = 12      -- distance from the box edges
 local ICON_BOX = math.ceil(ICON_R + ICON_THICK)
 
+-- Flag rules: no spaces and none of these characters
 local FLAG_FORBIDDEN = [===['";*()^%$+×÷=/€£¥₩`~\|<>{}[]▪︎○●□■♤♡◇♧☆⊙°•¤《》¡¿,.]===]
 
 local function flagProblem(flag)
@@ -76,6 +105,7 @@ if problem then
 	return
 end
 
+-- Every GUI made by these scripts, wherever it lives
 local function collectGuis()
 	local list, seen = {}, {}
 	local function add(inst)
@@ -100,12 +130,47 @@ local function collectGuis()
 	return list
 end
 
+-- One GUI per flag: running again with the same flag replaces the old one
 for _, old in ipairs(collectGuis()) do
 	if old:GetAttribute("Flag") == FLAG then
 		old:Destroy()
 	end
 end
 
+-- Saved positions: kept in a file by FLAG, so they survive between sessions
+local canUseFiles = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+local memoryStore = _G
+pcall(function()
+	if getgenv then memoryStore = getgenv() end
+end)
+
+local function loadAllPositions()
+	if canUseFiles then
+		local ok, result = pcall(function()
+			if not isfile(SAVE_FILE) then return {} end
+			local data = HttpService:JSONDecode(readfile(SAVE_FILE))
+			if type(data) == "table" and type(data.positions) == "table" then
+				return data.positions
+			end
+			return {}
+		end)
+		if ok and type(result) == "table" then return result end
+		return {}
+	end
+	return memoryStore.MobileButtonPositions or {} -- no file access here: remembered until the game closes
+end
+
+local function saveAllPositions(positions)
+	if canUseFiles then
+		pcall(function()
+			writefile(SAVE_FILE, HttpService:JSONEncode({ version = 1, positions = positions }))
+		end)
+	else
+		memoryStore.MobileButtonPositions = positions
+	end
+end
+
+-- Random 20-character name, different for every GUI
 local CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789*^%/?#$"
 local rng = Random.new()
 
@@ -153,6 +218,7 @@ local function run(fn)
 	end)
 end
 
+-- Highest place available: hidden UI container > CoreGui > PlayerGui
 local function parentGui(gui)
 	local targets = {}
 	if gethui then
@@ -169,11 +235,14 @@ local function parentGui(gui)
 	end
 end
 
+----------------------------------------------------------------
+-- Build the GUI
+----------------------------------------------------------------
 local screenGui = make("ScreenGui", {
 	Name = randomName(20),
 	ResetOnSpawn = false,
 	IgnoreGuiInset = true,
-	DisplayOrder = 2147483647,
+	DisplayOrder = 2147483647, -- above every other GUI
 	OnTopOfCoreBlur = true,
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 }, nil)
@@ -190,6 +259,7 @@ local function viewport()
 	return size
 end
 
+-- Off-screen protection (the drag bar below the box is counted too)
 local function fitSize(size)
 	local v = viewport()
 	return Vector2.new(
@@ -210,14 +280,28 @@ local function clampCenter(center, size)
 	)
 end
 
-local function cornerFor(size)
+-- Corner roundness: the default shape scales with the box (never past MAX_CORNER pixels),
+-- the pill and circle shapes are fully round
+local function cornerFor(size, forMode)
+	if forMode == "pill" or forMode == "circle" then
+		return math.floor(math.min(size.X, size.Y) / 2 + 0.5)
+	end
 	return math.floor(math.min(CORNER * math.min(size.X, size.Y), MAX_CORNER) + 0.5)
 end
 
+-- Both versions use the same size and the same SPAWN point, so they appear in the exact same spot
 local startSize = fitSize(START_SIZE)
 local v0 = viewport()
-local startCenter = clampCenter(Vector2.new(v0.X * SPAWN.X, v0.Y * SPAWN.Y), startSize)
+local defaultCenter = clampCenter(Vector2.new(v0.X * SPAWN.X, v0.Y * SPAWN.Y), startSize) -- the starting point
+local startCenter = defaultCenter
+if SAVE_POSITION then
+	local saved = loadAllPositions()[FLAG]
+	if type(saved) == "table" and type(saved.x) == "number" and type(saved.y) == "number" then
+		startCenter = clampCenter(Vector2.new(v0.X * saved.x, v0.Y * saved.y), startSize)
+	end
+end
 
+-- Holder: the thing that moves and resizes. Everything lives inside it.
 local holder = make("Frame", {
 	Name = "Holder",
 	AnchorPoint = Vector2.new(0.5, 0.5),
@@ -228,6 +312,7 @@ local holder = make("Frame", {
 
 local popScale = make("UIScale", { Name = "PopScale", Scale = 0.7 }, holder)
 
+-- Glow: soft image behind the box
 local glow = make("ImageLabel", {
 	Name = "Glow",
 	AnchorPoint = Vector2.new(0.5, 0.5),
@@ -241,11 +326,13 @@ local glow = make("ImageLabel", {
 	ZIndex = 1,
 }, holder)
 
+-- 9-slice the glow using the image's real size: the corners and soft edges stay a
+-- constant size and only the middle stretches, so resizing never distorts it.
 task.spawn(function()
 	local deadline = os.clock() + 5
 	while glow.Parent and os.clock() < deadline do
 		local ok, size = pcall(function() return glow.ContentImageSize end)
-		if not ok then return end
+		if not ok then return end -- older client: keep the plain stretch
 		if size.X > 0 and size.Y > 0 then
 			local sx, sy = size.X * GLOW_SLICE, size.Y * GLOW_SLICE
 			glow.SliceCenter = Rect.new(sx, sy, size.X - sx, size.Y - sy)
@@ -257,10 +344,12 @@ task.spawn(function()
 	end
 end)
 
+-- strength: 0 = off, 1 = full flash
 local function setGlow(strength, time, style)
 	tween(glow, time, { ImageTransparency = 1 - GLOW_BRIGHTNESS * strength }, style)
 end
 
+-- Box
 local box = make("Frame", {
 	Name = "Box",
 	Size = UDim2.fromScale(1, 1),
@@ -277,6 +366,7 @@ local stroke = make("UIStroke", {
 	ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 }, box)
 
+-- Clickable body
 local body = make("TextButton", {
 	Name = "Body",
 	Size = UDim2.fromScale(1, 1),
@@ -287,6 +377,7 @@ local body = make("TextButton", {
 	ZIndex = 1,
 }, box)
 
+-- Text: fixed size, dead center of the box
 local label = make("TextLabel", {
 	Name = "Label",
 	AnchorPoint = Vector2.new(0.5, 0.5),
@@ -305,6 +396,7 @@ local label = make("TextLabel", {
 	ZIndex = 2,
 }, box)
 
+-- Drag bar: outside the box, just below it (fixed pixel size)
 local dragHit = make("TextButton", {
 	Name = "DragHit",
 	AnchorPoint = Vector2.new(0.5, 0.5),
@@ -328,6 +420,7 @@ local bar = make("Frame", {
 }, dragHit)
 make("UICorner", { CornerRadius = UDim.new(1, 0) }, bar)
 
+-- Resize handle in the bottom-right corner (invisible hit area + the arc icon)
 local handle = make("TextButton", {
 	Name = "ResizeHandle",
 	AnchorPoint = Vector2.new(1, 1),
@@ -340,6 +433,8 @@ local handle = make("TextButton", {
 	ZIndex = 5,
 }, box)
 
+-- The icon is a quarter circle drawn with round dots, so both ends are rounded.
+-- It sits in a CanvasGroup so the overlapping dots fade as one clean shape.
 local iconGroup = make("CanvasGroup", {
 	Name = "Icon",
 	AnchorPoint = Vector2.new(1, 1),
@@ -367,22 +462,144 @@ do
 	end
 end
 
+-- Pill shape: a vertical bar inside the body at the right end (resizes the length only)
+local pillHandle = make("TextButton", {
+	Name = "PillHandle",
+	AnchorPoint = Vector2.new(1, 0.5),
+	Position = UDim2.new(1, -6, 0.5, 0),
+	Size = UDim2.fromOffset(PILL_HIT.X, PILL_HIT.Y),
+	BackgroundTransparency = 1,
+	Text = "",
+	AutoButtonColor = false,
+	Selectable = false,
+	Interactable = false,
+	ZIndex = 5,
+}, box)
+local pillBar = make("Frame", {
+	Name = "PillBar",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = PILL_BAR_SIZE,
+	BackgroundColor3 = WHITE,
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ZIndex = 5,
+}, pillHandle)
+make("UICorner", { CornerRadius = UDim.new(1, 0) }, pillBar)
+
+-- Cycle button (top-left): a circle with two arrows. Tapping it cycles the shape
+-- default > pill > circle, and the icon spins every time it switches
+local collapseHit = make("TextButton", {
+	Name = "CycleHit",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0, 21, 0, 21),
+	Size = UDim2.fromOffset(CYCLE_HIT, CYCLE_HIT),
+	BackgroundTransparency = 1,
+	Text = "",
+	AutoButtonColor = false,
+	Selectable = false,
+	ZIndex = 5,
+}, box)
+local cycleIcon = make("CanvasGroup", {
+	Name = "CycleIcon",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(CYCLE_BOX, CYCLE_BOX),
+	BackgroundTransparency = 1,
+	GroupTransparency = 1,
+	ZIndex = 5,
+}, collapseHit)
+do
+	local center = CYCLE_BOX / 2
+	local wing = 5              -- length of each arrow-head line
+	local sweep = math.rad(120) -- how much of the circle each arrow covers
+	local steps = math.max(8, math.ceil((CYCLE_R * sweep) / (CYCLE_THICK / 3)))
+
+	local function roundPart(position, size, rotation)
+		local part = make("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromOffset(position.X, position.Y),
+			Size = UDim2.fromOffset(size.X, size.Y),
+			Rotation = rotation,
+			BackgroundColor3 = WHITE,
+			BorderSizePixel = 0,
+			ZIndex = 5,
+		}, cycleIcon)
+		make("UICorner", { CornerRadius = UDim.new(1, 0) }, part)
+	end
+
+	for _, startAngle in ipairs({ 0, math.pi }) do
+		-- the arc, drawn with round dots
+		for i = 0, steps do
+			local angle = startAngle + sweep * (i / steps)
+			roundPart(
+				Vector2.new(center + CYCLE_R * math.cos(angle), center + CYCLE_R * math.sin(angle)),
+				Vector2.new(CYCLE_THICK, CYCLE_THICK),
+				0
+			)
+		end
+
+		-- the arrow head at the end of the arc (two short lines meeting at the tip)
+		local endAngle = startAngle + sweep
+		local tip = Vector2.new(center + CYCLE_R * math.cos(endAngle), center + CYCLE_R * math.sin(endAngle))
+		local back = Vector2.new(math.sin(endAngle), -math.cos(endAngle)) -- back along the arc
+		for _, spread in ipairs({ math.rad(40), -math.rad(40) }) do
+			local cosS, sinS = math.cos(spread), math.sin(spread)
+			local dir = Vector2.new(back.X * cosS - back.Y * sinS, back.X * sinS + back.Y * cosS)
+			roundPart(tip + dir * (wing / 2), Vector2.new(wing, CYCLE_THICK), math.deg(math.atan2(dir.Y, dir.X)))
+		end
+	end
+end
+
+----------------------------------------------------------------
+-- Smooth move + resize + shapes
+----------------------------------------------------------------
 local connections = {}
 
+local mode = "default" -- "default", "pill" or "circle"
 local dragging, resizing = false, false
 local activeInput, inputStart
 local dragOrigin, resizeOriginSize, resizeTopLeft
 
+-- Size limits for the pill and circle shapes
+local pillMinWidth = math.max(MIN_SIZE.X, PILL_HEIGHT * 1.25)
+local circleMin = math.max(MIN_SIZE.X, MIN_SIZE.Y)
+local circleMax = math.min(MAX_SIZE.X, MAX_SIZE.Y)
+
 local sizeTarget = startSize
 local posTarget = startCenter
 local sizeCur, posCur = startSize, startCenter
-local lastCorner = cornerFor(startSize)
+local cornerCur = cornerFor(startSize, "default")
+local lastCorner = -1
+local lastInset = -1
+local morphUntil = 0
+
+-- Each shape remembers its own size, so switching back and forth feels natural
+local circleStart = math.clamp((startSize.X + startSize.Y) / 2, circleMin, circleMax)
+local modeSizes = {
+	default = startSize,
+	pill = Vector2.new(math.clamp(startSize.X, pillMinWidth, MAX_SIZE.X), PILL_HEIGHT),
+	circle = Vector2.new(circleStart, circleStart),
+}
 
 connections[#connections + 1] = RunService.RenderStepped:Connect(function(dt)
+	-- off-screen protection every frame (and the shape rules)
 	sizeTarget = fitSize(sizeTarget)
+	if mode == "circle" then
+		local side = math.min(sizeTarget.X, sizeTarget.Y)
+		sizeTarget = Vector2.new(side, side)
+	elseif mode == "pill" then
+		sizeTarget = Vector2.new(sizeTarget.X, math.min(sizeTarget.Y, PILL_HEIGHT))
+	end
 	posTarget = clampCenter(posTarget, sizeTarget)
 
-	local speed = resizing and RESIZE_FOLLOW_SPEED or DRAG_FOLLOW_SPEED
+	-- slower follow while dragging = the box trails behind the bar, shape changes ease in gently
+	local speed = DRAG_FOLLOW_SPEED
+	if resizing then
+		speed = RESIZE_FOLLOW_SPEED
+	elseif os.clock() < morphUntil then
+		speed = MORPH_FOLLOW_SPEED
+	end
 	local alpha = 1 - math.exp(-dt * speed)
 	sizeCur = fitSize(sizeCur:Lerp(sizeTarget, alpha))
 	posCur = clampCenter(posCur:Lerp(posTarget, alpha), sizeCur)
@@ -390,13 +607,40 @@ connections[#connections + 1] = RunService.RenderStepped:Connect(function(dt)
 	holder.Size = UDim2.fromOffset(math.floor(sizeCur.X + 0.5), math.floor(sizeCur.Y + 0.5))
 	holder.Position = UDim2.fromOffset(math.floor(posCur.X + 0.5), math.floor(posCur.Y + 0.5))
 
-	local corner = cornerFor(sizeCur)
+	-- the corners ease toward the roundness of the current shape
+	cornerCur += (cornerFor(sizeCur, mode) - cornerCur) * (1 - math.exp(-dt * CORNER_SPEED))
+	local corner = math.floor(cornerCur + 0.5)
 	if corner ~= lastCorner then
 		lastCorner = corner
 		boxCorner.CornerRadius = UDim.new(0, corner)
 	end
+
+	-- the corner icons follow the rounded edge, so they always stay inside the shape
+	local inset = math.max(ICON_INSET, 0.293 * cornerCur + 1)
+	if math.abs(inset - lastInset) > 0.05 then
+		lastInset = inset
+		local extra = inset - ICON_INSET
+		handle.Position = UDim2.new(1, -extra, 1, -extra)
+		local c = inset + 9
+		collapseHit.Position = UDim2.new(0, c, 0, c)
+	end
 end)
 
+-- Save where this button is (by its FLAG)
+local function savePosition()
+	if not SAVE_POSITION then return end
+	local v = viewport()
+	local all = loadAllPositions()
+	all[FLAG] = { x = posTarget.X / v.X, y = posTarget.Y / v.Y }
+	saveAllPositions(all)
+end
+
+-- ResetMBPositions sends every button back to its starting point
+screenGui:GetAttributeChangedSignal("ResetPosition"):Connect(function()
+	posTarget = clampCenter(defaultCenter, sizeTarget)
+end)
+
+-- Drag: only while holding the bar
 dragHit.InputBegan:Connect(function(input)
 	if not isPress(input) or dragging or resizing then return end
 	dragging = true
@@ -408,6 +652,7 @@ dragHit.InputBegan:Connect(function(input)
 		if input.UserInputState == Enum.UserInputState.End then
 			dragging = false
 			tween(bar, 0.3, { BackgroundTransparency = BAR_IDLE, Size = BAR_SIZE })
+			savePosition()
 		end
 	end)
 end)
@@ -418,8 +663,9 @@ dragHit.MouseLeave:Connect(function()
 	if not dragging then tween(bar, 0.25, { BackgroundTransparency = BAR_IDLE }) end
 end)
 
+-- Resize (default and circle shapes): only while holding the corner handle
 handle.InputBegan:Connect(function(input)
-	if not isPress(input) or dragging or resizing then return end
+	if not isPress(input) or dragging or resizing or mode == "pill" then return end
 	resizing = true
 	activeInput = input
 	inputStart = p2(input)
@@ -429,15 +675,38 @@ handle.InputBegan:Connect(function(input)
 	input.Changed:Connect(function()
 		if input.UserInputState == Enum.UserInputState.End then
 			resizing = false
-			tween(iconGroup, 0.3, { GroupTransparency = ICON_IDLE })
+			if mode ~= "pill" then tween(iconGroup, 0.3, { GroupTransparency = ICON_IDLE }) end
 		end
 	end)
 end)
 handle.MouseEnter:Connect(function()
-	if not resizing then tween(iconGroup, 0.2, { GroupTransparency = 0.2 }) end
+	if not resizing and mode ~= "pill" then tween(iconGroup, 0.2, { GroupTransparency = 0.2 }) end
 end)
 handle.MouseLeave:Connect(function()
-	if not resizing then tween(iconGroup, 0.25, { GroupTransparency = ICON_IDLE }) end
+	if not resizing and mode ~= "pill" then tween(iconGroup, 0.25, { GroupTransparency = ICON_IDLE }) end
+end)
+
+-- Resize (pill shape): only the length, by holding the vertical bar
+pillHandle.InputBegan:Connect(function(input)
+	if not isPress(input) or dragging or resizing or mode ~= "pill" then return end
+	resizing = true
+	activeInput = input
+	inputStart = p2(input)
+	resizeOriginSize = sizeTarget
+	resizeTopLeft = posTarget - sizeTarget / 2
+	tween(pillBar, 0.2, { BackgroundTransparency = 0.15, Size = PILL_BAR_SIZE_ACTIVE })
+	input.Changed:Connect(function()
+		if input.UserInputState == Enum.UserInputState.End then
+			resizing = false
+			if mode == "pill" then tween(pillBar, 0.3, { BackgroundTransparency = BAR_IDLE, Size = PILL_BAR_SIZE }) end
+		end
+	end)
+end)
+pillHandle.MouseEnter:Connect(function()
+	if not resizing and mode == "pill" then tween(pillBar, 0.2, { BackgroundTransparency = 0.3 }) end
+end)
+pillHandle.MouseLeave:Connect(function()
+	if not resizing and mode == "pill" then tween(pillBar, 0.25, { BackgroundTransparency = BAR_IDLE }) end
 end)
 
 connections[#connections + 1] = UserInputService.InputChanged:Connect(function(input)
@@ -449,19 +718,118 @@ connections[#connections + 1] = UserInputService.InputChanged:Connect(function(i
 		posTarget = clampCenter(dragOrigin + delta, sizeTarget)
 	else
 		local v = viewport()
-		local newSize = Vector2.new(
-			math.clamp(resizeOriginSize.X + delta.X, MIN_SIZE.X, MAX_SIZE.X),
-			math.clamp(resizeOriginSize.Y + delta.Y, MIN_SIZE.Y, MAX_SIZE.Y)
-		)
+		local newSize
+		if mode == "pill" then
+			-- only the length changes, the height stays locked
+			newSize = Vector2.new(math.clamp(resizeOriginSize.X + delta.X, pillMinWidth, MAX_SIZE.X), PILL_HEIGHT)
+		elseif mode == "circle" then
+			-- x and y always stay the same size
+			local side = math.clamp(resizeOriginSize.X + (delta.X + delta.Y) / 2, circleMin, circleMax)
+			newSize = Vector2.new(side, side)
+		else
+			newSize = Vector2.new(
+				math.clamp(resizeOriginSize.X + delta.X, MIN_SIZE.X, MAX_SIZE.X),
+				math.clamp(resizeOriginSize.Y + delta.Y, MIN_SIZE.Y, MAX_SIZE.Y)
+			)
+		end
+		-- never grow past the edge of the screen
 		newSize = Vector2.new(
 			math.min(newSize.X, v.X - SCREEN_MARGIN - resizeTopLeft.X),
 			math.min(newSize.Y, v.Y - SCREEN_MARGIN - BAR_BELOW - resizeTopLeft.Y)
 		)
+		if mode == "circle" then
+			local side = math.min(newSize.X, newSize.Y)
+			newSize = Vector2.new(side, side)
+		end
 		sizeTarget = newSize
-		posTarget = resizeTopLeft + newSize / 2
+		posTarget = resizeTopLeft + newSize / 2 -- top-left corner stays put
 	end
 end)
 
+-- Shape name: sits on top of the title and shows for a moment when the shape changes
+local modeLabel = make("TextLabel", {
+	Name = "ModeLabel",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = label.Position,
+	Size = label.Size,
+	BackgroundTransparency = 1,
+	Text = "",
+	TextColor3 = WHITE,
+	TextTransparency = 1,
+	TextSize = TEXT_SIZE,
+	TextScaled = false,
+	TextWrapped = true,
+	TextXAlignment = Enum.TextXAlignment.Center,
+	TextYAlignment = Enum.TextYAlignment.Center,
+	FontFace = FONT,
+	ZIndex = 2,
+}, box)
+
+local flashToken = 0
+local function flashModeName(name)
+	flashToken += 1
+	local token = flashToken
+	modeLabel.Text = name
+
+	-- quick crossfade: the title fades out while the shape name fades in
+	tween(label, 0.2, { TextTransparency = 1 }, Enum.EasingStyle.Quad)
+	tween(modeLabel, 0.2, { TextTransparency = TEXT_TRANSPARENCY }, Enum.EasingStyle.Quad)
+
+	-- after a moment it fades out into the normal title
+	task.delay(0.2 + MODE_TEXT_TIME, function()
+		if token ~= flashToken or not screenGui.Parent then return end
+		tween(modeLabel, 0.4, { TextTransparency = 1 }, Enum.EasingStyle.Sine)
+		tween(label, 0.4, { TextTransparency = TEXT_TRANSPARENCY }, Enum.EasingStyle.Sine)
+	end)
+end
+
+-- Shapes: the cycle button goes default > pill > circle > default
+local MODES = { "default", "pill", "circle" }
+
+local function setMode(newMode)
+	if newMode == mode or dragging or resizing then return end
+	modeSizes[mode] = sizeTarget -- remember the shape we're leaving
+	mode = newMode
+	sizeTarget = fitSize(modeSizes[newMode])
+	morphUntil = os.clock() + 0.8
+
+	-- the old resize icon fades out, the new one fades in
+	local isPill = newMode == "pill"
+	handle.Interactable = not isPill
+	pillHandle.Interactable = isPill
+	tween(iconGroup, 0.35, { GroupTransparency = isPill and 1 or ICON_IDLE }, Enum.EasingStyle.Quad)
+	tween(pillBar, 0.4, { BackgroundTransparency = isPill and BAR_IDLE or 1 }, Enum.EasingStyle.Quad)
+
+	-- the text glides to the right height for the new shape
+	local nudge = TEXT_NUDGE_Y
+	if isPill then nudge = PILL_TEXT_NUDGE_Y elseif newMode == "circle" then nudge = CIRCLE_TEXT_NUDGE_Y end
+	local textPosition = UDim2.new(0.5, 0, 0.5, nudge)
+	tween(label, 0.45, { Position = textPosition })
+	tween(modeLabel, 0.45, { Position = textPosition })
+
+	flashModeName(MODE_NAMES[newMode] or newMode)
+end
+
+local spin = 0
+collapseHit.Activated:Connect(function()
+	local before = mode
+	setMode(MODES[(table.find(MODES, mode) or 1) % #MODES + 1])
+	if mode == before then return end -- it didn't switch (busy dragging or resizing)
+
+	-- spin once, smoothly, every time the shape switches
+	spin += 360
+	tween(cycleIcon, 0.7, { Rotation = spin }, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+end)
+collapseHit.MouseEnter:Connect(function()
+	tween(cycleIcon, 0.2, { GroupTransparency = 0.2 })
+end)
+collapseHit.MouseLeave:Connect(function()
+	tween(cycleIcon, 0.25, { GroupTransparency = CYCLE_IDLE })
+end)
+
+----------------------------------------------------------------
+-- Click: press animation, on/off state, glow, run ON / OFF code
+----------------------------------------------------------------
 local isOn = false
 local stateToken = 0
 
@@ -474,6 +842,7 @@ local function setState(on)
 	tween(stroke, 0.25, { Transparency = on and 0.3 or STROKE_IDLE, Thickness = on and 2 or 1 })
 
 	if on then
+		-- bright flash, then settle into a steady glow
 		setGlow(1, 0.08, Enum.EasingStyle.Quad)
 		task.delay(0.1, function()
 			if token ~= stateToken or not screenGui.Parent then return end
@@ -504,6 +873,9 @@ body.Activated:Connect(function()
 	run(nextState and OnCode or OffCode)
 end)
 
+----------------------------------------------------------------
+-- Cleanup + pop-in
+----------------------------------------------------------------
 screenGui.Destroying:Connect(function()
 	for _, c in ipairs(connections) do c:Disconnect() end
 	table.clear(connections)
@@ -519,6 +891,7 @@ local fades = {
 	{ label, "TextTransparency", TEXT_TRANSPARENCY },
 	{ bar, "BackgroundTransparency", BAR_IDLE },
 	{ iconGroup, "GroupTransparency", ICON_IDLE },
+	{ cycleIcon, "GroupTransparency", CYCLE_IDLE },
 }
 tween(popScale, 0.5, { Scale = 1 }, Enum.EasingStyle.Back)
 for _, f in ipairs(fades) do
