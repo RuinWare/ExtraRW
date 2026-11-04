@@ -14,7 +14,7 @@ local GLOW_SPREAD = 70
 local GLOW_BRIGHTNESS = 0.50
 local GLOW_SLICE = 0.4
 local SCREEN_MARGIN = 6
-local TEXT_NUDGE_Y = -30
+local TEXT_NUDGE_Y = 0
 local BAR_DISTANCE = 5
 local DRAG_FOLLOW_SPEED = 9
 local RESIZE_FOLLOW_SPEED = 26
@@ -24,7 +24,7 @@ local CIRCLE_TEXT_NUDGE_Y = TEXT_NUDGE_Y       -- text height in the circle shap
 local MORPH_FOLLOW_SPEED = 10                  -- lower = slower, smoother shape changes
 local SAVE_POSITION = true                     -- remember where you left each button (by its FLAG)
 local SAVE_FILE = "MobileButtons_Positions.json" -- must match ResetMBPositions
-local MODE_NAMES = { default = "Default", pill = "Pill", circle = "Circle" } -- shown when the shape changes
+local MODE_NAMES = { default = "Square", pill = "Pill", circle = "Circle" } -- shown when the shape changes
 local MODE_TEXT_TIME = 1                       -- seconds the shape name stays before fading back to the title
 local RUN_OFF_CODE_ON_DESTROY = true
 
