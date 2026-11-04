@@ -1,0 +1,4 @@
+if _G.RuinWareYLockConnection then
+    _G.RuinWareYLockConnection:Disconnect()
+    _G.RuinWareYLockConnection = nil
+end
