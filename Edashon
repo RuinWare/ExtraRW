@@ -1,0 +1,445 @@
+-- Ramp Face On
+
+-- ============================================================
+-- SETTINGS
+-- ============================================================
+local FLAG = "RampFace"      -- name of this system (the Off script needs the same flag)
+local RANGE = EDASHSTUDS              -- how close to a ramp you have to be, in studs
+local MIN_ANGLE = ANGLEEDASH         -- a surface counts as a ramp when it is tilted more than this many degrees
+local MAX_ANGLE = 80         -- ...and no more than this, so walls don't count
+local FACE = "BACKWARDS"     -- "BACKWARDS" = face down the ramp (away from its rise), "FORWARDS" = face up it
+local SMOOTHNESS = ESPEEDDASH        -- how smoothly it turns, 0 to 100 (0 = instant snap, 50 = in between, 100 = very smooth)
+local RELEASE_DELAY = 0.1    -- seconds it holds on after losing the ramp, so a one-frame miss can't make it stutter
+local SPAWN_IGNORE = 1       -- seconds after respawning that emote events are ignored (spawning can send fake ones)
+local DEBUG = false          -- true = prints what it sees (emote started/ended, ramp found) to help find problems
+
+-- Where the game's emote event is inside ReplicatedStorage. Paths are tried in order, the first one found is used.
+local EVENT_PATHS = {
+	{ "Remotes", "Character", "CharacterTask" },
+	{ "Events", "CharacterTask" },
+}
+
+-- ============================================================
+-- DO NOT EDIT BELOW THIS LINE
+-- ============================================================
+-- Ramp Face works with the game's Emote event, the same way the shiftlock emote system does.
+--   * Not emoting: it does nothing.
+--   * Emoting, and you are RANGE studs or closer to a ramp (a surface tilted more than
+--     MIN_ANGLE degrees, about the same height as your feet): your character is smoothly
+--     turned to face backwards relative to the ramp.
+--   * You leave the ramp (or move more than RANGE studs away) or the emote ends: it smoothly
+--     turns you back to the way you were facing, then lets go completely (your AutoRotate goes
+--     back to exactly what it was), so normal directions and first person look right again.
+-- It never touches the camera. Run Ramp Face Off (same FLAG) to shut the system down.
+-- Needs an executor with hookmetamethod, because that is how the Emote event is seen.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+-- Flag rules: no spaces and none of these characters
+local FLAG_FORBIDDEN = [===['";*()^%$+×÷=/€£¥₩`~\|<>{}[]▪︎○●□■♤♡◇♧☆⊙°•¤《》¡¿,.]===]
+
+local function flagProblem(flag)
+	if type(flag) ~= "string" or flag == "" then
+		return "the flag is empty"
+	end
+	if flag:find("%s") then
+		return "the flag contains a space"
+	end
+	local banned = { [160] = true, [0x200B] = true, [0x3000] = true }
+	for _, cp in utf8.codes(FLAG_FORBIDDEN) do
+		banned[cp] = true
+	end
+	for _, cp in utf8.codes(flag) do
+		if banned[cp] then
+			return 'the flag contains a character that is not allowed: "' .. utf8.char(cp) .. '"'
+		end
+	end
+	return nil
+end
+
+local flagOk, problem = pcall(flagProblem, FLAG)
+if not flagOk then problem = "the flag is not valid text" end
+if problem then
+	warn("Ramp Face: " .. problem .. " (FLAG = " .. tostring(FLAG) .. ")")
+	return
+end
+
+local BIND = "RampFace_" .. FLAG -- the On and Off scripts find each other through the flag
+
+-- Attribute names only allow letters, numbers and underscores, so encode anything else
+local ATTRIBUTE = "RampFaceRun_" .. (FLAG:gsub("[^%w]", function(c)
+	return string.format("_%02X", string.byte(c))
+end))
+
+local player = Players.LocalPlayer
+
+if not (hookmetamethod and newcclosure and getnamecallmethod) then
+	warn("Ramp Face: this needs an executor with hookmetamethod support, so it can't start here.")
+	return
+end
+
+for _, setting in ipairs({
+	{ "RANGE", RANGE }, { "MIN_ANGLE", MIN_ANGLE }, { "MAX_ANGLE", MAX_ANGLE },
+	{ "SMOOTHNESS", SMOOTHNESS }, { "RELEASE_DELAY", RELEASE_DELAY }, { "SPAWN_IGNORE", SPAWN_IGNORE },
+}) do
+	if type(setting[2]) ~= "number" or setting[2] < 0 then
+		warn("Ramp Face: " .. setting[1] .. " must be a number, 0 or higher (" .. setting[1] .. " = " .. tostring(setting[2]) .. ")")
+		return
+	end
+end
+FACE = string.upper(tostring(FACE))
+if FACE ~= "BACKWARDS" and FACE ~= "FORWARDS" then
+	warn('Ramp Face: FACE must be "BACKWARDS" or "FORWARDS" (FACE = ' .. tostring(FACE) .. ")")
+	return
+end
+
+SMOOTHNESS = math.clamp(SMOOTHNESS, 0, 100)
+-- 0 = instant. Otherwise this is how many seconds a turn takes to get about two thirds of the way
+-- there: 50 is about 0.125 seconds, 100 is half a second (very smooth).
+local turnTime = 0.5 * (SMOOTHNESS / 100) ^ 2
+
+-- Emote state is shared between runs, so the Emote event only gets hooked once per game
+local store = _G
+pcall(function()
+	if getgenv then store = getgenv() end
+end)
+local state = store.RampFaceState
+if not state then
+	state = { emoting = false, emoteChar = nil, ignoreUntil = 0, hookedFor = nil }
+	store.RampFaceState = state
+end
+state.ignoreUntil = state.ignoreUntil or 0
+
+local function findEvent()
+	for _, path in ipairs(EVENT_PATHS) do
+		local current = ReplicatedStorage
+		for _, name in ipairs(path) do
+			current = current and current:FindFirstChild(name)
+		end
+		if current and current:IsA("BaseRemoteEvent") then return current end
+	end
+	return nil
+end
+
+local event = findEvent()
+local waited = 0
+while not event and waited < 10 do
+	task.wait(0.25)
+	waited += 0.25
+	event = findEvent()
+end
+if not event then
+	local tried = {}
+	for _, path in ipairs(EVENT_PATHS) do tried[#tried + 1] = "ReplicatedStorage." .. table.concat(path, ".") end
+	warn("Ramp Face: couldn't find the emote event (tried " .. table.concat(tried, " and ") .. ")")
+	return
+end
+
+-- Hook once per game. After rejoining, the executor can still be open but the game is new,
+-- so the old hook is gone and a new one is needed.
+if state.hookedFor ~= event then
+	state.emoting = false
+
+	-- FireServer("Emote", <any number except 0>) = emoting, FireServer("Emote", 0) = stopped.
+	-- It remembers which character the emote started on, and ignores events right after a respawn.
+	-- The hook only reads plain values (no Instance method calls) so it can't disturb the original call.
+	local oldNamecall
+	oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+		local method = getnamecallmethod()
+
+		if self == event and method == "FireServer" then
+			local action, value = ...
+			if action == "Emote" and type(value) == "number" and os.clock() >= state.ignoreUntil then
+				state.emoting = value ~= 0
+				state.emoteChar = player.Character
+			end
+		end
+
+		return oldNamecall(self, ...)
+	end))
+	state.hookedFor = event
+end
+
+-- Each run gets its own id, so running this again (same flag) replaces the old one
+local runId = tostring(os.clock())
+local renderName = BIND .. runId
+
+local connections = {}
+
+-- Facing state
+local targetDirection = nil   -- the way the ramp wants you to face right now (nil = no ramp)
+local currentDirection = nil  -- the way we are actually holding you (nil = not holding you)
+local returnDirection = nil   -- the way you were facing before we took over
+local savedAutoRotate = nil   -- what AutoRotate was before we took over
+
+-- Hooks that react the instant anything touches the player's rotation (so the game can't win a frame)
+local hookConnections = {}
+local hookedRoot = nil
+local function unhook()
+	for _, c in ipairs(hookConnections) do c:Disconnect() end
+	table.clear(hookConnections)
+	hookedRoot = nil
+end
+
+-- Ramp check: drop rays from above in a small circle around the player's feet
+local RAY_UP = 8
+local RAY_DOWN = 20
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.RespectCanCollide = true
+rayParams.IgnoreWater = true
+
+local offsets = { Vector3.zero } -- straight below, then rings at half the range and at the full range
+for _, radius in ipairs({ RANGE / 2, RANGE }) do
+	for i = 0, 7 do
+		local angle = i * math.pi / 4
+		offsets[#offsets + 1] = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+	end
+end
+
+local lastFilterTime = -math.huge
+local lastFilterChar = nil
+
+-- Returns the direction to face (flat, pointing along the ramp), or nil if there's no ramp close enough
+local function findRampDirection(char, root, humanoid)
+	if char ~= lastFilterChar or os.clock() - lastFilterTime > 1 then
+		lastFilterChar = char
+		lastFilterTime = os.clock()
+		local filter = { char }
+		for _, other in ipairs(Players:GetPlayers()) do
+			if other.Character and other.Character ~= char then filter[#filter + 1] = other.Character end
+		end
+		rayParams.FilterDescendantsInstances = filter
+	end
+	rayParams.CollisionGroup = root.CollisionGroup -- hit what the player can actually stand on
+
+	local rootToFeet = humanoid.HipHeight + root.Size.Y / 2
+	if humanoid.RigType == Enum.HumanoidRigType.R6 then rootToFeet = 3 end
+	local feet = root.Position - Vector3.new(0, rootToFeet, 0)
+
+	for _, offset in ipairs(offsets) do -- nearest spots first
+		local origin = feet + offset + Vector3.new(0, RAY_UP, 0)
+		local result = workspace:Raycast(origin, Vector3.new(0, -(RAY_UP + RAY_DOWN), 0), rayParams)
+		if result then
+			-- characters (other players, bots, leftover bodies) are never ramps
+			local hitModel = result.Instance:FindFirstAncestorOfClass("Model")
+			local hitCharacter = hitModel and hitModel:FindFirstChildOfClass("Humanoid")
+
+			-- the ray is at most RANGE studs to the side, and the surface must be about at foot height
+			if not hitCharacter and math.abs(result.Position.Y - feet.Y) <= RANGE + 1 then
+				local normal = result.Normal
+				local tilt = math.deg(math.acos(math.clamp(normal.Y, -1, 1))) -- 0 = flat, 90 = wall
+				if tilt > MIN_ANGLE and tilt <= MAX_ANGLE then
+					local horizontal = Vector3.new(normal.X, 0, normal.Z)
+					if horizontal.Magnitude > 0.001 then
+						local downhill = horizontal.Unit -- the way the ramp leans, away from its rise
+						if FACE == "FORWARDS" then return -downhill end
+						return downhill
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- Let go completely: AutoRotate goes back to what it was, and the hold is removed
+local function release()
+	currentDirection = nil
+	unhook()
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+	if root then
+		local align = root:FindFirstChild(BIND)
+		if align then align:Destroy() end
+		local attachment = root:FindFirstChild(BIND .. "Attachment")
+		if attachment then attachment:Destroy() end
+	end
+	if humanoid then humanoid.AutoRotate = savedAutoRotate ~= false end
+end
+
+-- Put the player back facing the way they were before we took over
+local function snapBack()
+	if not returnDirection then return end
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if root then
+		root.CFrame = CFrame.lookAt(root.Position, root.Position + returnDirection)
+		root.AssemblyAngularVelocity = Vector3.zero
+	end
+end
+
+-- Turn a flat direction toward another one, smoothly
+local function turnToward(current, goal, dt)
+	if turnTime <= 0 then return goal end
+	local alpha = 1 - math.exp(-dt / turnTime)
+	local mixed = CFrame.lookAt(Vector3.zero, current):Lerp(CFrame.lookAt(Vector3.zero, goal), alpha).LookVector
+	local flat = Vector3.new(mixed.X, 0, mixed.Z)
+	if flat.Magnitude < 0.001 then return goal end
+	return flat.Unit
+end
+
+local lastEmoting, lastRamp = false, false
+local lastRampDirection, lastRampTime = nil, -math.huge
+local function debugLog(text)
+	if DEBUG then print("Ramp Face: " .. text) end
+end
+
+-- Work out where to face (only ever while emoting)
+local function detect()
+	targetDirection = nil
+
+	-- It only counts as emoting if the emote started on THIS character, so a respawn can't carry it over
+	local emoting = state.emoting and state.emoteChar == player.Character
+	if emoting ~= lastEmoting then
+		lastEmoting = emoting
+		debugLog(emoting and "emote started" or "emote ended")
+	end
+	if not emoting then
+		lastRampDirection = nil
+		return
+	end
+
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid or humanoid.Health <= 0 then return end
+	if humanoid:GetState() == Enum.HumanoidStateType.Dead then return end
+
+	local found = findRampDirection(char, root, humanoid)
+	if found then
+		lastRampDirection = found
+		lastRampTime = os.clock()
+		targetDirection = found
+	elseif lastRampDirection and os.clock() - lastRampTime <= RELEASE_DELAY then
+		targetDirection = lastRampDirection -- hold on through a one-frame miss
+	end
+
+	if (targetDirection ~= nil) ~= lastRamp then
+		lastRamp = targetDirection ~= nil
+		debugLog(lastRamp and "ramp found, turning the player" or "no ramp close enough")
+	end
+end
+
+-- Move the direction we hold toward the goal (once per frame)
+local function step(dt)
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid then
+		currentDirection = nil
+		return
+	end
+
+	local goal
+	if targetDirection then
+		if not currentDirection then
+			-- taking over: remember how things were, and start from the way you face now so the turn is smooth
+			local look = root.CFrame.LookVector
+			local flat = Vector3.new(look.X, 0, look.Z)
+			currentDirection = flat.Magnitude > 0.001 and flat.Unit or targetDirection
+			returnDirection = currentDirection
+			savedAutoRotate = humanoid.AutoRotate
+		end
+		goal = targetDirection
+	elseif currentDirection then
+		goal = returnDirection -- no ramp any more: smoothly turn back to how you were facing
+	else
+		return
+	end
+
+	currentDirection = turnToward(currentDirection, goal, dt)
+
+	-- finished turning back after leaving the ramp: let go completely
+	if not targetDirection and currentDirection:Dot(returnDirection) > 0.99985 then
+		snapBack()
+		release()
+	end
+end
+
+-- Hold that facing, hard enough that the game can't turn the player away
+local function apply()
+	local direction = currentDirection
+	if not direction then return end
+
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid then return end
+
+	-- react the instant anything touches the rotation (same as the shiftlock emote system)
+	if root ~= hookedRoot then
+		unhook()
+		hookedRoot = root
+		hookConnections[#hookConnections + 1] = root:GetPropertyChangedSignal("CFrame"):Connect(apply)
+		hookConnections[#hookConnections + 1] = humanoid:GetPropertyChangedSignal("AutoRotate"):Connect(apply)
+	end
+
+	if humanoid.AutoRotate then
+		savedAutoRotate = true -- the game wanted it on, remember that
+		humanoid.AutoRotate = false
+	end
+
+	local align = root:FindFirstChild(BIND)
+	if not align then
+		local attachment = Instance.new("Attachment")
+		attachment.Name = BIND .. "Attachment"
+		attachment.Parent = root
+
+		align = Instance.new("AlignOrientation")
+		align.Name = BIND
+		align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+		align.Attachment0 = attachment
+		align.RigidityEnabled = true
+		align.CFrame = root.CFrame
+		align.Parent = root
+	end
+
+	local facing = CFrame.lookAt(root.Position, root.Position + direction)
+	align.CFrame = facing
+	if root.CFrame.LookVector:Dot(direction) < 0.99999 then
+		root.CFrame = facing
+		root.AssemblyAngularVelocity = Vector3.zero
+	end
+end
+
+-- Stop everything (used by the Off script and when this script gets replaced)
+local function shutdown()
+	pcall(function()
+		RunService:UnbindFromRenderStep(renderName)
+	end)
+	for _, c in ipairs(connections) do c:Disconnect() end
+	table.clear(connections)
+	targetDirection = nil
+	if currentDirection then snapBack() end
+	release()
+end
+
+-- Runs last every frame (after the camera and the game's own scripts), and on every physics step
+RunService:BindToRenderStep(renderName, Enum.RenderPriority.Last.Value, function(dt)
+	detect()
+	step(dt)
+	apply()
+end)
+connections[#connections + 1] = RunService.Stepped:Connect(apply)
+connections[#connections + 1] = RunService.Heartbeat:Connect(apply)
+
+-- A respawn ends any emote and clears everything, and emote events are ignored for a moment
+connections[#connections + 1] = player.CharacterAdded:Connect(function()
+	state.emoting = false
+	state.ignoreUntil = os.clock() + SPAWN_IGNORE
+	targetDirection = nil
+	currentDirection = nil
+	lastRampDirection = nil
+	unhook()
+end)
+
+-- The Off script (or a newer run with the same flag) changes this, which shuts this run down
+player:SetAttribute(ATTRIBUTE, runId)
+connections[#connections + 1] = player:GetAttributeChangedSignal(ATTRIBUTE):Connect(function()
+	if player:GetAttribute(ATTRIBUTE) ~= runId then shutdown() end
+end)
