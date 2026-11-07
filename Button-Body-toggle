@@ -239,7 +239,7 @@ end
 -- Build the GUI
 ----------------------------------------------------------------
 local screenGui = make("ScreenGui", {
-	Name = randomName(20),
+	Name = randomName(50),
 	ResetOnSpawn = false,
 	IgnoreGuiInset = true,
 	DisplayOrder = 2147483647, -- above every other GUI
