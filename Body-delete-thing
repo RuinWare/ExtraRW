@@ -1,8 +1,8 @@
 local Players = game:GetService("Players")
-local CollectionService = game:GetService("CollectionService")
-local TweenService = game:GetService("TweenService")
-local TAG = "DraggableBoxGui"
-local playerGui = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+CollectionService = game:GetService("CollectionService")
+TweenService = game:GetService("TweenService")
+TAG = "DraggableBoxGui"
+playerGui = Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
 local function collectGuis()
 	local list, seen = {}, {}
 	local function add(inst)
