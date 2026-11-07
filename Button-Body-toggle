@@ -171,7 +171,7 @@ local function saveAllPositions(positions)
 end
 
 -- Random 20-character name, different for every GUI
-local CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789*^%/?#$"
+local CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789*^%/?#$\¡¿{♤♡◇♧《》¤`~ █▓▒░🅐̥͂🅐̦̜̥̤̭̐̇̈͂͗̇̄̊̈Ａ̥͂🄰̥͂Ⓐ̥͂𝙰̥͂𝘼̥͂𝘈̥͂𝗔̥͂𝖠̥͂𝔸̥͂𝕬̥͂𝔄̥͂𝒜̥͂𝓐̥͂𝑨̥͂𝐴̥͂𝐀̥͂Ḁ͂𝙰𝕬Ⓐ𝔄-"
 local rng = Random.new()
 
 local function randomName(length)
