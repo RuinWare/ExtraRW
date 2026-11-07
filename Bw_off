@@ -1,0 +1,30 @@
+-- LocalScript: ShiftlockBackOff
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local NAME = "CustomShiftlockBack"
+local SYSTEM = "CustomShiftlockBackSystem"
+
+player:SetAttribute(SYSTEM, false)
+player:SetAttribute(NAME, false)
+pcall(function()
+	RunService:UnbindFromRenderStep(NAME)
+end)
+
+local char = player.Character
+if not char then return end
+
+local root = char:FindFirstChild("HumanoidRootPart")
+if root then
+	local align = root:FindFirstChild(NAME)
+	if align then align:Destroy() end
+	local att = root:FindFirstChild(NAME .. "Attachment")
+	if att then att:Destroy() end
+end
+
+local hum = char:FindFirstChildOfClass("Humanoid")
+if hum then
+	hum.AutoRotate = true
+end
